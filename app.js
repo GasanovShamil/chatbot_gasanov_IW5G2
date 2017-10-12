@@ -1,8 +1,7 @@
 var builder = require('botbuilder');
 var restify = require('restify');
-
-//restify server
 var server = restify.createServer();
+
 server.listen(process.env.port || 3978, function(){
     console.log(`server name: ${server.name} | ${server.url}`)
 });
@@ -14,9 +13,11 @@ var connector = new builder.ChatConnector({
 
 server.post('/api/messages', connector.listen());
 
-
 var bot = new builder.UniversalBot(connector, [
-    session => session.beginDialog('greetings')
+    function (session) {
+        session.userData.profile = {};
+        session.beginDialog('greetings');
+    }
 ]);
 
 bot.on('conversationUpdate', (message) => {
@@ -24,95 +25,106 @@ bot.on('conversationUpdate', (message) => {
         message.membersAdded.forEach(function (identity) {
             if (identity.id === message.address.bot.id) {
                 let msg = new builder.Message().address(message.address);
-                msg.text('Bonjour bienvenue sur le bot');
+                msg.text('Hello! Je suis votre assistant');
                 bot.send(msg);    
             }
         });
     }
 });
 
+var menu = {
+    'Saisir le nom': { dialog: 'askName' },
+    'Numéro de téléphone': { dialog: 'askPhoneNumber' },
+    'Nombre de personne': { dialog: 'askNbPerson' },
+    'Date de reservation': { dialog: 'askDate' },
+    'Valider': { dialog: 'validate' }
+}
+
 bot.dialog('greetings',[
-    function (session) {
-        session.beginDialog('askName');
+    function (session, args) {
+        builder.Prompts.choice(session, 'Choisissez l\'option svp:', menu, { listStyle: builder.ListStyle.list });
     },
     function (session, results) {
-        //session.endDialog('Hello %s!', results.response);
-        /*session.endDialogWithResult({ 
-            response: { name: session.dialogData.name, nombre: session.dialogData.nombre, date: session.dialogData.date }
-          });*/
-        session.send(`Bonjour ${results.response.name}, votre table de ${results.response.nombre} personnes sera 
-        disponible le : ${results.response.date}`);
+        if (results.response)
+            session.beginDialog(menu[results.response.entity].dialog);
+    },
+    function (session, results) {
+        session.beginDialog('greetings');
     }
-]);
-
-
+]).triggerAction({
+    matches: /^main menu$/i,
+    confirmPrompt: 'Revenir au menu ?'
+});
 
 bot.dialog('askName', [
-    function (session, args, next) {
-        session.dialogData.profile = args || {}; 
-        if (!session.dialogData.profile.name) {
-            builder.Prompts.text(session, "What's your name?");
-        } else {
-            next();
-        }
-    },
-
-    function (session , results, next) {
-        if (results.response) {
-            session.dialogData.profile.name = results.response;
-        }
-        if (!session.dialogData.profile.nombre) {
-            builder.Prompts.number(session, "Une table de combien de personne ?");
-        } else {
-            next(); 
-        }
-    },
-    function (session , results, next) {
-        if (results.response) {
-            session.dialogData.profile.nombre = results.response;
-        }
-        if (!session.dialogData.profile.date) {
-            builder.Prompts.number(session, "Pour quelle date ?");
-        } else {
-            next(); 
-        }
+    function (session) {
+        builder.Prompts.text(session, 'Comment vous vous appelez ?');
     },
     function (session, results) {
-        if (results.response) {
-            session.dialogData.profile.date = results.response;
-        }
-        session.endDialogWithResult({ response: session.dialogData.profile });
+        session.userData.profile.name = results.response;
+        session.endDialogWithResult(results);
     }
 ]);
 
+bot.dialog('askPhoneNumber', [
+    function (session, args) {
+        if (args && args.retry)
+            builder.Prompts.text(session, 'Quel est votre numéro de téléphone ? (Format : 06 58 71 92 04 ou 0658719204)');
+        else
+            builder.Prompts.text(session, 'Quel est votre numéro de téléphone ?');
+    },
+    function (session, results) {
+        var matched = results.response.match(/\d+/g);
+        var number = matched ? matched.join('') : '';
 
+        if (number.length == 10) {
+            session.userData.profile.phoneNumber = number;
+            session.endDialogWithResult(results);
+        } else
+            session.replaceDialog('askPhoneNumber', { retry: true });
+    }
+]);
 
-// var bot = new builder.UniversalBot(connector, function(session){
-    
-//     bot.on('typing', function(){
-//         session.send('hey your typing');
-//     });
+bot.dialog('askNbPerson', [
+    function (session) {
+        builder.Prompts.number(session, 'Pour combien de personnes voulez-vous réserver ?');
+    },
+    function (session, results) {
+        session.userData.profile.nbPerson = results.response;
+        session.endDialogWithResult(results);
+    }
+]);
 
-    
+bot.dialog('askDate', [
+    function (session) {
+        builder.Prompts.time(session, 'Pour quelle date ?');
+    },
+    function (session, results) {
+        session.userData.profile.date = formatDate(builder.EntityRecognizer.resolveTime([results.response]));
+        session.endDialogWithResult(results);
+    }
+]);
 
-//     if (session.dialogData === null){
-//         session.send('Hello there!');
-//     }
-//     session.send(`OK, ça fonctionne!! [message.length = ${session.message.text.length}]`);
-//     session.send(`Session state = ${JSON.stringify(session.sessionState)}]`);
-//     session.send(JSON.stringify(session.dialogData));
-// });
+bot.dialog('validate', [
+    function (session) {
+        var name = session.userData.profile.name;
+        var phoneNumber = session.userData.profile.phoneNumber;
+        var nbPerson = session.userData.profile.nbPerson;
+        var date = session.userData.profile.date;
 
+       if (name && phoneNumber && nbPerson && date) {
+            session.send(`Vous souhaitez réserver pour ${nbPerson} personne(s) le ${date} au nom de ${name}, votre numéro de téléphone est le ${phoneNumber}.`)
+            builder.Prompts.confirm(session, 'Êtes-vous sûr ?');
+        } else {
+            session.endDialog('Il manque des informations !');
+        }
+    },
+    function (session, results) {
+        session.send('Votre réservation a bien été prise en compte ! Merci de votre confiance.')
+        session.endConversation();
+    }
+]);
 
-// bot.on('conversationUpdate', (message) => {
-//     if (message.membersAdded) {
-//         message.membersAdded.forEach(function (identity) {
-//             if (identity.id === message.address.bot.id) {
-//                 let msg = new builder.Message().address(message.address);
-//                 msg.text('Hello, this is a notification');
-//                 msg.textLocale('en-US');
-//                 bot.send(msg);    
-//             }
-//         });
-//     }
-// });
+function formatDate(date) {
+    return date.getDate() + '/' + (date.getMonth() + 1) + '/' + date.getFullYear();
+};
