@@ -1,130 +1,101 @@
-var builder = require('botbuilder');
 var restify = require('restify');
+var builder = require('botbuilder');
+var cognitiveServices = require('botbuilder-cognitiveservices');
+
+// Setup Restify Server
 var server = restify.createServer();
-
-server.listen(process.env.port || 3978, function(){
-    console.log(`server name: ${server.name} | ${server.url}`)
+server.listen(process.env.port || process.env.PORT || 3978, function () {
+    console.log('%s listening to %s', server.name, server.url);
 });
 
+// Create chat connector for communicating with the Bot Framework Service
 var connector = new builder.ChatConnector({
-    appId: process.env.APP_ID,
-    appPassword: process.env.APP_PASSWORD
+    appId: process.env.MICROSOFT_APP_ID,
+    appPassword: process.env.MICROSOFT_APP_PASSWORD
 });
 
+// Listen for messages from users
 server.post('/api/messages', connector.listen());
 
-var bot = new builder.UniversalBot(connector, [
-    function (session) {
-        session.userData.profile = {};
-        session.beginDialog('greetings');
-    }
-]);
+// Receive messages from the user and respond by echoing each message back (prefixed with 'You said:')
+var bot = new builder.UniversalBot(connector);
 
-bot.on('conversationUpdate', (message) => {
-    if (message.membersAdded) {
-        message.membersAdded.forEach(function (identity) {
-            if (identity.id === message.address.bot.id) {
-                let msg = new builder.Message().address(message.address);
-                msg.text('Hello! Je suis votre assistant');
-                bot.send(msg);    
-            }
-        });
-    }
+
+// POST /knowledgebases/97763c34-65da-40f4-9fa3-9a934848e02a/generateAnswer
+// Host: https://westus.api.cognitive.microsoft.com/qnamaker/v2.0
+// Ocp-Apim-Subscription-Key: 97d7c8e2b5c94ce295787da257790c86
+// Content-Type: application/json
+// {"question":"hi"}
+var qnaMekerRecogniser = new cognitiveServices.QnAMakerRecognizer({
+    knowledgeBaseId:'97763c34-65da-40f4-9fa3-9a934848e02a',
+    subscriptionKey:'97d7c8e2b5c94ce295787da257790c86'
 });
 
-var menu = {
-    'Saisir le nom': { dialog: 'askName' },
-    'Numéro de téléphone': { dialog: 'askPhoneNumber' },
-    'Nombre de personne': { dialog: 'askNbPerson' },
-    'Date de reservation': { dialog: 'askDate' },
-    'Valider': { dialog: 'validate' }
-}
+var qnaMakerDialog = new cognitiveServices.QnAMakerDialog({
+    recognizers:[qnaMekerRecogniser],
+    qnaThreshold:0.4,
+    defaultMessage: 'tu te trompe gros!'
+});
 
-bot.dialog('greetings',[
-    function (session, args) {
-        builder.Prompts.choice(session, 'Choisissez l\'option svp:', menu, { listStyle: builder.ListStyle.list });
-    },
-    function (session, results) {
-        if (results.response)
-            session.beginDialog(menu[results.response.entity].dialog);
-    },
-    function (session, results) {
-        session.beginDialog('greetings');
+// bot.dialog('/', qnaMakerDialog);
+
+var luisEndpoint = 'https://westus.api.cognitive.microsoft.com/luis/v2.0/apps/00998a70-c4b7-4dde-ba83-4d7b55488a92?subscription-key=0898a72fbc3341dfb5220cae1a6b77b9&spellCheck=true&verbose=true&timezoneOffset=0';
+var luisRecognizer = new builder.LuisRecognizer(luisEndpoint);
+
+bot.recognizer(luisRecognizer);
+
+//var entities = builder.EntityRecognizer.findEntity(intentResult.entities, 'HomeAutomation.Device');
+// var message = `Intent : ${JSON.stringify(result.intent)}\n--------------------\n`;
+// result.entities.forEach(function(element) {
+//     message += `Entity : ${element.entity}\n`
+//     message += `Type : ${element.type}\n-------`
+// }, this);
+// session.send(message);
+
+bot.dialog('HomePilot', [
+    function(session, args, next){
+        var message = '';
+
+        if (args) {
+            var result = args.intent;
+            var operation = builder.EntityRecognizer.findEntity(result.entities, 'HomeAutomation.Operation');
+            var device = builder.EntityRecognizer.findEntity(result.entities, 'HomeAutomation.Device');
+            var room = builder.EntityRecognizer.findEntity(result.entities, 'HomeAutomation.Room');
+
+            if (operation) {
+                if (operation.entity == 'on') message += 'ALLUMER ' + device.entity;
+                else if (operation.entity == 'off') message += 'ETEINDRE ' + device.entity;
+            } else {
+                message += 'CHANGER ' + device.entity;
+
+                var temperature = builder.EntityRecognizer.findEntity(result.entities, 'temperature');
+                if (temperature) {
+                    message += ' A ' + temperature.entity;
+                } else {
+                    var color = builder.EntityRecognizer.findEntity(result.entities, 'HomeAutomation.Color');
+                    if (color) message += ' EN ' + color.entity;
+
+                    var percentage = builder.EntityRecognizer.findEntity(result.entities, 'percentage');
+                    if (percentage) message += ' A ' + percentage.entity;
+                }
+            }
+
+            if (room) message += ' DANS ' + room.entity;
+
+        } else {
+            message += 'Je n\'ai pas compris votre demande, veuillez reformuler.';
+        }
+
+        session.send(message);
     }
 ]).triggerAction({
-    matches: /^main menu$/i,
-    confirmPrompt: 'Revenir au menu ?'
+    matches:['HomeAutomation.TurnOn', 'HomeAutomation.TurnOff', 'HomeAutomation.Control']
 });
 
-bot.dialog('askName', [
-    function (session) {
-        builder.Prompts.text(session, 'Comment vous vous appelez ?');
-    },
-    function (session, results) {
-        session.userData.profile.name = results.response;
-        session.endDialogWithResult(results);
+bot.dialog('Error', [
+    function(session){
+        session.send('Je n\'ai pas compris votre demande, veuillez reformuler.');
     }
-]);
-
-bot.dialog('askPhoneNumber', [
-    function (session, args) {
-        if (args && args.retry)
-            builder.Prompts.text(session, 'Quel est votre numéro de téléphone ? (Format : 06 58 71 92 04 ou 0658719204)');
-        else
-            builder.Prompts.text(session, 'Quel est votre numéro de téléphone ?');
-    },
-    function (session, results) {
-        var matched = results.response.match(/\d+/g);
-        var number = matched ? matched.join('') : '';
-
-        if (number.length == 10) {
-            session.userData.profile.phoneNumber = number;
-            session.endDialogWithResult(results);
-        } else
-            session.replaceDialog('askPhoneNumber', { retry: true });
-    }
-]);
-
-bot.dialog('askNbPerson', [
-    function (session) {
-        builder.Prompts.number(session, 'Pour combien de personnes voulez-vous réserver ?');
-    },
-    function (session, results) {
-        session.userData.profile.nbPerson = results.response;
-        session.endDialogWithResult(results);
-    }
-]);
-
-bot.dialog('askDate', [
-    function (session) {
-        builder.Prompts.time(session, 'Pour quelle date ?');
-    },
-    function (session, results) {
-        session.userData.profile.date = formatDate(builder.EntityRecognizer.resolveTime([results.response]));
-        session.endDialogWithResult(results);
-    }
-]);
-
-bot.dialog('validate', [
-    function (session) {
-        var name = session.userData.profile.name;
-        var phoneNumber = session.userData.profile.phoneNumber;
-        var nbPerson = session.userData.profile.nbPerson;
-        var date = session.userData.profile.date;
-
-       if (name && phoneNumber && nbPerson && date) {
-            session.send(`Vous souhaitez réserver pour ${nbPerson} personne(s) le ${date} au nom de ${name}, votre numéro de téléphone est le ${phoneNumber}.`)
-            builder.Prompts.confirm(session, 'Êtes-vous sûr ?');
-        } else {
-            session.endDialog('Il manque des informations !');
-        }
-    },
-    function (session, results) {
-        session.send('Votre réservation a bien été prise en compte ! Merci de votre confiance.')
-        session.endConversation();
-    }
-]);
-
-function formatDate(date) {
-    return date.getDate() + '/' + (date.getMonth() + 1) + '/' + date.getFullYear();
-};
+]).triggerAction({
+    matches: /^(?!(HomeAutomation.))/i
+});
